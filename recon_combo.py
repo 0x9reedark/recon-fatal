@@ -59,6 +59,13 @@ DEFAULT_NMAP_PORTS = (
 MAX_PORTS_WITHOUT_CONFIRM = 50
 MAX_NMAP_PORTS_WITHOUT_CONFIRM = 256
 USER_AGENT = "recon-combo-web/2.0 authorized-security-testing"
+BANNER = r"""
+  ____ ____  _____ _____ ____    _    ____  _  __  _____  _  _____  _    _       ____  _____ ____ ___  _   _
+ / ___|  _ \| ____| ____|  _ \  / \  |  _ \| |/ / |  ___|/ \|_   _|/ \  | |     |  _ \| ____/ ___/ _ \| \ | |
+| |  _| |_) |  _| |  _| | | | |/ _ \ | |_) | ' /  | |_  / _ \ | | / _ \ | |     | |_) |  _|| |  | | | |  \| |
+| |_| |  _ <| |___| |___| |_| / ___ \|  _ <| . \  |  _|/ ___ \| |/ ___ \| |___  |  _ <| |__| |__| |_| | |\  |
+ \____|_| \_\_____|_____|____/_/   \_\_| \_\_|\_\ |_| /_/   \_\_/_/   \_\_____| |_| \_\_____\____\___/|_| \_|
+"""
 TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 META_GENERATOR_RE = re.compile(
     rb"<meta[^>]+name=[\"']generator[\"'][^>]+content=[\"']([^\"']+)[\"']",
@@ -892,6 +899,7 @@ def quote_arg(value: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    print(BANNER, file=sys.stderr)
     parser = build_parser()
     args = parser.parse_args(argv)
     domain, base_url, ports, paths, nmap_ports = validate_args(args)
