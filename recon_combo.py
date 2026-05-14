@@ -16,6 +16,7 @@ import ssl
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -50,7 +51,13 @@ DEFAULT_SUBDOMAINS = [
 
 DEFAULT_WEB_PORTS = "80,443,3000,5000,8000,8080,8081,8443,8888,9000"
 DEFAULT_PATHS = "/robots.txt,/sitemap.xml,/.well-known/security.txt"
+DEFAULT_NMAP_PORTS = (
+    "21,22,25,53,80,110,143,443,445,587,993,995,1433,1521,2049,2375,2376,"
+    "3000,3306,3389,5000,5432,5900,6379,8000,8080,8081,8443,8888,9000,"
+    "9200,9300,11211,27017"
+)
 MAX_PORTS_WITHOUT_CONFIRM = 50
+MAX_NMAP_PORTS_WITHOUT_CONFIRM = 256
 USER_AGENT = "recon-combo-web/2.0 authorized-security-testing"
 TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 META_GENERATOR_RE = re.compile(
@@ -135,6 +142,35 @@ class PathResult:
     content_type: str | None
     interesting: bool
     notes: list[str]
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class NmapPort:
+    host: str
+    port: int
+    protocol: str
+    state: str
+    service: str | None
+    product: str | None
+    version: str | None
+
+
+@dataclass(frozen=True)
+class NmapScriptFinding:
+    host: str
+    port: int | None
+    script_id: str
+    output: str
+
+
+@dataclass(frozen=True)
+class NmapResult:
+    command: list[str]
+    targets: list[str]
+    ports: list[NmapPort]
+    scripts: list[NmapScriptFinding]
+    stderr: str | None = None
     error: str | None = None
 
 
@@ -547,9 +583,140 @@ def run_tls_checks(hosts: list[str], ports: list[int], timeout: float, workers: 
     return sorted(results, key=lambda item: (item.host, item.port))
 
 
+def run_nmap_scan(args: argparse.Namespace, hosts: list[str], nmap_ports: list[int]) -> NmapResult:
+    targets = [args.domain]
+    if args.nmap_include_subdomains:
+        targets.extend(hosts)
+    targets = sorted(set(targets))
+    command = [
+        args.nmap_path,
+        "-oX",
+        "-",
+        "-Pn",
+        "-n",
+        "-sV",
+        f"-T{args.nmap_timing}",
+        "-p",
+        ",".join(str(port) for port in nmap_ports),
+    ]
+    command.append("-sS" if args.nmap_stealth else "-sT")
+
+    if args.nmap_vuln:
+        command.extend(["--script", "vuln"])
+
+    command.extend(targets)
+
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=args.nmap_timeout,
+        )
+    except FileNotFoundError:
+        return NmapResult(command=command, targets=targets, ports=[], scripts=[], error="nmap not found")
+    except subprocess.TimeoutExpired:
+        return NmapResult(command=command, targets=targets, ports=[], scripts=[], error="nmap timed out")
+
+    if completed.returncode != 0 and not completed.stdout.strip():
+        return NmapResult(
+            command=command,
+            targets=targets,
+            ports=[],
+            scripts=[],
+            stderr=trim_text(completed.stderr),
+            error=f"nmap exited with status {completed.returncode}",
+        )
+
+    ports, scripts, parse_error = parse_nmap_xml(completed.stdout)
+    return NmapResult(
+        command=command,
+        targets=targets,
+        ports=ports,
+        scripts=scripts,
+        stderr=trim_text(completed.stderr) if completed.stderr.strip() else None,
+        error=parse_error,
+    )
+
+
+def parse_nmap_xml(xml_text: str) -> tuple[list[NmapPort], list[NmapScriptFinding], str | None]:
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        return [], [], f"could not parse nmap XML: {exc}"
+
+    ports: list[NmapPort] = []
+    scripts: list[NmapScriptFinding] = []
+
+    for host_node in root.findall("host"):
+        host = nmap_host_label(host_node)
+        hostscript = host_node.find("hostscript")
+        if hostscript is not None:
+            scripts.extend(parse_script_nodes(host, None, hostscript.findall("script")))
+
+        for port_node in host_node.findall("./ports/port"):
+            state_node = port_node.find("state")
+            state = state_node.get("state") if state_node is not None else None
+            if state != "open":
+                continue
+
+            port_id = int(port_node.get("portid", "0"))
+            service_node = port_node.find("service")
+            ports.append(
+                NmapPort(
+                    host=host,
+                    port=port_id,
+                    protocol=port_node.get("protocol", "tcp"),
+                    state=state,
+                    service=service_node.get("name") if service_node is not None else None,
+                    product=service_node.get("product") if service_node is not None else None,
+                    version=service_node.get("version") if service_node is not None else None,
+                )
+            )
+            scripts.extend(parse_script_nodes(host, port_id, port_node.findall("script")))
+
+    return (
+        sorted(ports, key=lambda item: (item.host, item.port, item.protocol)),
+        sorted(scripts, key=lambda item: (item.host, item.port or 0, item.script_id)),
+        None,
+    )
+
+
+def nmap_host_label(host_node: ET.Element) -> str:
+    hostname_node = host_node.find("./hostnames/hostname")
+    if hostname_node is not None and hostname_node.get("name"):
+        return hostname_node.get("name", "")
+    address_node = host_node.find("address")
+    if address_node is not None and address_node.get("addr"):
+        return address_node.get("addr", "")
+    return "unknown"
+
+
+def parse_script_nodes(host: str, port: int | None, script_nodes: list[ET.Element]) -> list[NmapScriptFinding]:
+    findings = []
+    for script_node in script_nodes:
+        output = trim_text(script_node.get("output", ""))
+        if output:
+            findings.append(
+                NmapScriptFinding(
+                    host=host,
+                    port=port,
+                    script_id=script_node.get("id", "unknown"),
+                    output=output,
+                )
+            )
+    return findings
+
+
+def trim_text(value: str, limit: int = 2000) -> str:
+    clean = re.sub(r"\s+", " ", value).strip()
+    return clean[:limit] if len(clean) > limit else clean
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Authorized web application recon: DNS, HTTP(S), headers, TLS, and well-known files.",
+        description="Authorized web application recon: DNS, HTTP(S), headers, TLS, well-known files, and optional Nmap.",
         epilog="Only test web applications you own or have explicit permission to assess.",
     )
     parser.add_argument("target", help="Base domain or URL, such as example.com or https://app.example.com")
@@ -566,12 +733,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-body", type=int, default=65536, help="Maximum response bytes to read per request")
     parser.add_argument("--max-redirects", type=int, default=5, help="Maximum redirects to follow")
     parser.add_argument("--allow-large-scan", action="store_true", help="Allow more than 50 web ports")
+    parser.add_argument("--nmap", action="store_true", help="Run an optional Nmap service scan against the root target")
+    parser.add_argument("--nmap-stealth", action="store_true", help="Use Nmap TCP SYN scan (-sS); may require admin/root")
+    parser.add_argument("--nmap-vuln", action="store_true", help="Run Nmap vuln NSE scripts; implies --nmap")
+    parser.add_argument("--nmap-include-subdomains", action="store_true", help="Include resolved subdomains in Nmap scope")
+    parser.add_argument("--nmap-ports", default=DEFAULT_NMAP_PORTS, help=f"Nmap ports/ranges. Default: {DEFAULT_NMAP_PORTS}")
+    parser.add_argument("--nmap-timing", type=int, default=3, help="Nmap timing template 0-5, default: 3")
+    parser.add_argument("--nmap-timeout", type=float, default=300.0, help="Nmap process timeout in seconds")
+    parser.add_argument("--nmap-path", default="nmap", help="Path to the nmap executable")
+    parser.add_argument("--allow-large-nmap-scan", action="store_true", help="Allow more than 256 Nmap ports")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of text")
     parser.add_argument("--output", help="Write results to this file")
     return parser
 
 
-def validate_args(args: argparse.Namespace) -> tuple[str, str | None, list[int], list[str]]:
+def validate_args(args: argparse.Namespace) -> tuple[str, str | None, list[int], list[str], list[int]]:
     domain, base_url = normalize_target(args.target)
     args.domain = domain
 
@@ -587,6 +763,12 @@ def validate_args(args: argparse.Namespace) -> tuple[str, str | None, list[int],
         raise SystemExit("--max-redirects cannot be negative")
     if args.https_only and args.http_only:
         raise SystemExit("--https-only and --http-only cannot be used together")
+    if not 0 <= args.nmap_timing <= 5:
+        raise SystemExit("--nmap-timing must be between 0 and 5")
+    if args.nmap_timeout <= 0:
+        raise SystemExit("--nmap-timeout must be greater than zero")
+    if args.nmap_vuln:
+        args.nmap = True
 
     ports = parse_ports(args.ports)
     if len(ports) > MAX_PORTS_WITHOUT_CONFIRM and not args.allow_large_scan:
@@ -594,7 +776,15 @@ def validate_args(args: argparse.Namespace) -> tuple[str, str | None, list[int],
             f"refusing to check {len(ports)} web ports without --allow-large-scan "
             f"(limit is {MAX_PORTS_WITHOUT_CONFIRM})"
         )
-    return domain, base_url, ports, parse_paths(args.paths)
+
+    nmap_ports = parse_ports(args.nmap_ports)
+    if len(nmap_ports) > MAX_NMAP_PORTS_WITHOUT_CONFIRM and not args.allow_large_nmap_scan:
+        raise SystemExit(
+            f"refusing to scan {len(nmap_ports)} Nmap ports without --allow-large-nmap-scan "
+            f"(limit is {MAX_NMAP_PORTS_WITHOUT_CONFIRM})"
+        )
+
+    return domain, base_url, ports, parse_paths(args.paths), nmap_ports
 
 
 def format_text(payload: dict) -> str:
@@ -661,13 +851,50 @@ def format_text(payload: dict) -> str:
     else:
         lines.append("  [INFO] No selected well-known files found.")
 
+    if payload.get("nmap"):
+        nmap = payload["nmap"]
+        lines.extend(["", "Nmap scan:"])
+        if nmap["command"]:
+            lines.append(f"  command: {format_command(nmap['command'])}")
+        if nmap["targets"]:
+            lines.append(f"  targets: {', '.join(nmap['targets'])}")
+        if nmap["error"]:
+            lines.append(f"  [ERROR] {nmap['error']}")
+        elif nmap["ports"]:
+            lines.append("  Open ports:")
+            for item in nmap["ports"]:
+                service = item["service"] or "unknown"
+                details = " ".join(part for part in [item["product"], item["version"]] if part)
+                suffix = f" ({details})" if details else ""
+                lines.append(f"    {item['host']}:{item['port']}/{item['protocol']} {service}{suffix}")
+        else:
+            lines.append("  [INFO] No open ports reported by Nmap.")
+
+        if nmap["scripts"]:
+            lines.append("  Script findings:")
+            for item in nmap["scripts"][:30]:
+                port = f":{item['port']}" if item["port"] is not None else ""
+                lines.append(f"    [{item['script_id']}] {item['host']}{port} {item['output']}")
+        if nmap["stderr"]:
+            lines.append(f"  stderr: {nmap['stderr']}")
+
     return "\n".join(lines)
+
+
+def format_command(command: list[str]) -> str:
+    return " ".join(quote_arg(part) for part in command)
+
+
+def quote_arg(value: str) -> str:
+    if re.search(r"\s", value):
+        return f'"{value}"'
+    return value
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    domain, base_url, ports, paths = validate_args(args)
+    domain, base_url, ports, paths, nmap_ports = validate_args(args)
     words = load_subdomain_words(args)
 
     print("Use only against web applications you own or have explicit authorization to test.", file=sys.stderr)
@@ -693,6 +920,10 @@ def main(argv: list[str] | None = None) -> int:
         query_dns_record(domain, "MX", args.timeout),
         query_dns_record(domain, "TXT", args.timeout),
     ]
+    nmap_result = None
+    if args.nmap:
+        print("Running optional Nmap scan...", file=sys.stderr)
+        nmap_result = run_nmap_scan(args, hosts, nmap_ports)
 
     payload = {
         "target": args.target,
@@ -703,6 +934,7 @@ def main(argv: list[str] | None = None) -> int:
         "web": [asdict(item) for item in web_results],
         "tls": [asdict(item) for item in tls_results],
         "paths": [asdict(item) for item in path_results],
+        "nmap": asdict(nmap_result) if nmap_result else None,
     }
 
     output = json.dumps(payload, indent=2) if args.json else format_text(payload)

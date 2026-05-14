@@ -11,9 +11,12 @@ It gathers useful non-exploitative context for a domain or web app URL:
 - Collects TLS certificate summary data for HTTPS ports.
 - Checks `robots.txt`, `sitemap.xml`, and `/.well-known/security.txt`.
 - Attempts MX and TXT DNS lookups through the system `nslookup` command when available.
+- Optionally runs Nmap service detection, TCP SYN "stealth" scans, and Nmap `vuln` NSE scripts.
 - Can save text or JSON reports.
 
 This project is not for exploitation. Use it ethically and only on systems you own or have explicit written permission to test.
+
+Nmap scanning requires Nmap to be installed separately and available on `PATH`, or supplied with `--nmap-path`.
 
 ## Usage
 
@@ -47,14 +50,34 @@ Save JSON output:
 python .\recon_combo.py example.com --json --output results.json
 ```
 
+Run Nmap service detection against the root target:
+
+```powershell
+python .\recon_combo.py example.com --nmap
+```
+
+Run a TCP SYN scan and Nmap vulnerability scripts:
+
+```powershell
+python .\recon_combo.py example.com --nmap-stealth --nmap-vuln
+```
+
+Include resolved subdomains in Nmap scope:
+
+```powershell
+python .\recon_combo.py example.com --nmap --nmap-include-subdomains
+```
+
 ## Safety Defaults
 
 - The default subdomain list is web-application focused.
 - The default port list is limited to common web ports.
 - Port checks above 50 ports are refused unless `--allow-large-scan` is provided.
+- Nmap is opt-in. It scans the root target by default and only includes resolved subdomains with `--nmap-include-subdomains`.
+- Nmap scans above 256 ports are refused unless `--allow-large-nmap-scan` is provided.
 - Concurrency is limited by `--workers`, defaulting to `20`.
 - HTTP(S) response bodies are capped with `--max-body`, defaulting to 64 KiB.
-- The tool performs information gathering only. It does not fuzz forms, submit payloads, brute force directories, exploit vulnerabilities, or run destructive checks.
+- The tool does not fuzz forms, submit payloads, brute force directories, or exploit vulnerabilities. Nmap `vuln` scripts are optional checks and may be noisy depending on the target.
 
 ## Options
 
@@ -73,6 +96,16 @@ target                  Domain or URL, such as example.com or https://app.exampl
 --max-body BYTES        Maximum response bytes to read per request, default: 65536
 --max-redirects COUNT   Maximum redirects to follow, default: 5
 --allow-large-scan      Allow more than 50 web ports
+--nmap                  Run an optional Nmap service scan against the root target
+--nmap-stealth          Use Nmap TCP SYN scan (-sS); may require admin/root
+--nmap-vuln             Run Nmap vuln NSE scripts; implies --nmap
+--nmap-include-subdomains
+                        Include resolved subdomains in Nmap scope
+--nmap-ports LIST       Nmap ports/ranges, default: focused common service ports
+--nmap-timing N         Nmap timing template 0-5, default: 3
+--nmap-timeout SECONDS  Nmap process timeout, default: 300
+--nmap-path PATH        Path to the nmap executable
+--allow-large-nmap-scan Allow more than 256 Nmap ports
 --json                  Print JSON output
 --output FILE           Save output to a file
 ```
