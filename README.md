@@ -50,6 +50,12 @@ Save JSON output:
 python .\recon_combo.py example.com --json --output results.json
 ```
 
+Print only the compact report summary:
+
+```powershell
+python .\recon_combo.py example.com --summary
+```
+
 Run Nmap service detection against the root target:
 
 ```powershell
@@ -106,6 +112,7 @@ target                  Domain or URL, such as example.com or https://app.exampl
 --nmap-timeout SECONDS  Nmap process timeout, default: 300
 --nmap-path PATH        Path to the nmap executable
 --allow-large-nmap-scan Allow more than 256 Nmap ports
+--summary              Print only a compact report summary
 --json                  Print JSON output
 --output FILE           Save output to a file
 ```
