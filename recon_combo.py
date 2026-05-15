@@ -749,6 +749,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--nmap-timeout", type=float, default=300.0, help="Nmap process timeout in seconds")
     parser.add_argument("--nmap-path", default="nmap", help="Path to the nmap executable")
     parser.add_argument("--allow-large-nmap-scan", action="store_true", help="Allow more than 256 Nmap ports")
+    parser.add_argument("--summary", action="store_true", help="Print only a compact report summary")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of text")
     parser.add_argument("--output", help="Write results to this file")
     return parser
@@ -799,8 +800,13 @@ def format_text(payload: dict) -> str:
         f"Target: {payload['target']}",
         f"Scope: web application recon only",
         "",
-        "Resolved hosts:",
+        "Summary:",
     ]
+    lines.extend(format_summary_lines(payload["summary"], indent="  "))
+    lines.extend([
+        "",
+        "Resolved hosts:",
+    ])
 
     resolved_hosts = payload["resolved_hosts"]
     if resolved_hosts:
@@ -888,6 +894,61 @@ def format_text(payload: dict) -> str:
     return "\n".join(lines)
 
 
+def build_summary(payload: dict) -> dict:
+    live_web = [item for item in payload["web"] if item["status"] is not None]
+    web_errors = [item for item in payload["web"] if item["error"]]
+    tls_results = [item for item in payload["tls"] if not item["error"]]
+    tls_errors = [item for item in payload["tls"] if item["error"]]
+    tls_expiring_soon = [
+        item
+        for item in tls_results
+        if item["expires_in_days"] is not None and item["expires_in_days"] <= 30
+    ]
+    interesting_paths = [item for item in payload["paths"] if item["interesting"]]
+    status_counts: dict[str, int] = {}
+    for item in live_web:
+        status = str(item["status"])
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    nmap = payload.get("nmap") or {}
+    return {
+        "resolved_hosts": len(payload["resolved_hosts"]),
+        "dns_record_types_with_values": sum(1 for item in payload["dns_records"] if item["values"]),
+        "live_web_endpoints": len(live_web),
+        "web_errors": len(web_errors),
+        "status_counts": dict(sorted(status_counts.items())),
+        "endpoints_missing_security_headers": sum(1 for item in live_web if item["security_headers_missing"]),
+        "tls_certificates": len(tls_results),
+        "tls_expiring_within_30_days": len(tls_expiring_soon),
+        "tls_errors": len(tls_errors),
+        "interesting_paths": len(interesting_paths),
+        "nmap_open_ports": len(nmap.get("ports", [])),
+        "nmap_script_findings": len(nmap.get("scripts", [])),
+    }
+
+
+def format_summary(summary: dict) -> str:
+    return "\n".join(format_summary_lines(summary))
+
+
+def format_summary_lines(summary: dict, indent: str = "") -> list[str]:
+    status_counts = summary["status_counts"]
+    status_text = ", ".join(f"{status}: {count}" for status, count in status_counts.items()) or "none"
+    return [
+        f"{indent}Resolved hosts: {summary['resolved_hosts']}",
+        f"{indent}DNS record types with values: {summary['dns_record_types_with_values']}",
+        f"{indent}Live web endpoints: {summary['live_web_endpoints']} ({status_text})",
+        f"{indent}Web check errors: {summary['web_errors']}",
+        f"{indent}Endpoints missing security headers: {summary['endpoints_missing_security_headers']}",
+        f"{indent}TLS certificates: {summary['tls_certificates']}",
+        f"{indent}TLS certificates expiring within 30 days: {summary['tls_expiring_within_30_days']}",
+        f"{indent}TLS check errors: {summary['tls_errors']}",
+        f"{indent}Interesting well-known files: {summary['interesting_paths']}",
+        f"{indent}Nmap open ports: {summary['nmap_open_ports']}",
+        f"{indent}Nmap script findings: {summary['nmap_script_findings']}",
+    ]
+
+
 def format_command(command: list[str]) -> str:
     return " ".join(quote_arg(part) for part in command)
 
@@ -944,8 +1005,12 @@ def main(argv: list[str] | None = None) -> int:
         "paths": [asdict(item) for item in path_results],
         "nmap": asdict(nmap_result) if nmap_result else None,
     }
+    payload["summary"] = build_summary(payload)
 
-    output = json.dumps(payload, indent=2) if args.json else format_text(payload)
+    if args.summary:
+        output = json.dumps(payload["summary"], indent=2) if args.json else format_summary(payload["summary"])
+    else:
+        output = json.dumps(payload, indent=2) if args.json else format_text(payload)
 
     if args.output:
         Path(args.output).write_text(output + "\n", encoding="utf-8")
