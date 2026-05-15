@@ -41,7 +41,7 @@ python .\recon_combo.py example.com --subdomains www,app,api,staging --ports 80,
 Use a wordlist:
 
 ```powershell
-python .\recon_combo.py example.com --wordlist .\subdomains.txt
+python .\recon_combo.py example.com --wordlist .\examples\subdomains.txt
 ```
 
 Save JSON output:
@@ -108,4 +108,32 @@ target                  Domain or URL, such as example.com or https://app.exampl
 --allow-large-nmap-scan Allow more than 256 Nmap ports
 --json                  Print JSON output
 --output FILE           Save output to a file
+```
+
+## Project Layout
+
+```text
+recon-combo/
+  recon_combo.py          Main CLI tool
+  README.md               Usage and safety notes
+  requirements.txt        Runtime dependency list
+  examples/               Example input files
+  tests/                  Unit tests for parsing and URL generation
+  .gitignore              Local files ignored by Git
+```
+
+## Development
+
+Recon Fatal currently uses only the Python standard library. Nmap support requires Nmap to be installed separately when those options are used. A virtual environment is still useful so future Python dependencies stay isolated:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+Run the unit tests:
+
+```powershell
+python -m unittest discover
 ```

@@ -1,0 +1,9 @@
+# Example web-focused subdomain labels.
+www
+app
+api
+admin
+portal
+staging
+docs
+support
