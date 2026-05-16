@@ -66,6 +66,8 @@ BANNER = r"""
 | |_| |  _ <| |___| |___| |_| / ___ \|  _ <| . \  |  _|/ ___ \| |/ ___ \| |___  |  _ <| |__| |__| |_| | |\  |
  \____|_| \_\_____|_____|____/_/   \_\_| \_\_|\_\ |_| /_/   \_\_/_/   \_\_____| |_| \_\_____\____\___/|_| \_|
 """
+BANNER_TITLE = "GREED FATAL RECON"
+BANNER_FRAMES = ("|", "/", "-", "\\")
 TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 META_GENERATOR_RE = re.compile(
     rb"<meta[^>]+name=[\"']generator[\"'][^>]+content=[\"']([^\"']+)[\"']",
@@ -91,6 +93,35 @@ SECURITY_HEADERS = {
     "referrer-policy": "Referrer-Policy",
     "permissions-policy": "Permissions-Policy",
 }
+
+
+def print_banner(animate: bool = True) -> None:
+    if not animate or not sys.stderr.isatty():
+        print(BANNER, file=sys.stderr)
+        return
+
+    lines = BANNER.strip("\n").splitlines()
+    frame_count = 18
+    max_offset = 10
+
+    print("\033[?25l", end="", file=sys.stderr)
+    try:
+        for frame_index in range(frame_count):
+            offset = abs((frame_index % (max_offset * 2)) - max_offset)
+            spinner = BANNER_FRAMES[frame_index % len(BANNER_FRAMES)]
+            color = 31 + frame_index % 6
+            prefix = " " * offset
+
+            if frame_index:
+                print(f"\033[{len(lines) + 2}F", end="", file=sys.stderr)
+
+            print(f"\r\033[2K\033[1;{color}m{prefix}[{spinner}] {BANNER_TITLE}\033[0m", file=sys.stderr)
+            for line in lines:
+                print(f"\r\033[2K\033[1;{color}m{prefix}{line}\033[0m", file=sys.stderr)
+            print(f"\r\033[2K{prefix}initializing authorized recon console...", file=sys.stderr)
+            time.sleep(0.045)
+    finally:
+        print("\033[?25h", end="", file=sys.stderr)
 
 
 class NoRedirectHandler(HTTPRedirectHandler):
@@ -752,6 +783,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summary", action="store_true", help="Print only a compact report summary")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of text")
     parser.add_argument("--output", help="Write results to this file")
+    parser.add_argument("--no-banner-animation", action="store_true", help="Print the startup banner without animation")
     return parser
 
 
@@ -960,9 +992,9 @@ def quote_arg(value: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    print(BANNER, file=sys.stderr)
     parser = build_parser()
     args = parser.parse_args(argv)
+    print_banner(animate=not args.no_banner_animation)
     domain, base_url, ports, paths, nmap_ports = validate_args(args)
     words = load_subdomain_words(args)
 
